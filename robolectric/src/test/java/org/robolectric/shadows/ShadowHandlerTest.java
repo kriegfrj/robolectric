@@ -1,14 +1,18 @@
 package org.robolectric.shadows;
 
 import android.os.Handler;
+import android.os.HandlerThread;
 import android.os.Looper;
 import android.os.Message;
 
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.TestName;
 import org.junit.runner.RunWith;
 import org.robolectric.Robolectric;
 import org.robolectric.TestRunners;
+import org.robolectric.internal.Shadow;
 import org.robolectric.util.ReflectionHelpers;
 import org.robolectric.util.TestRunnable;
 import org.robolectric.util.Transcript;
@@ -24,19 +28,28 @@ import static org.robolectric.util.ReflectionHelpers.ClassParameter.from;
 
 @RunWith(TestRunners.MultiApiWithDefaults.class)
 public class ShadowHandlerTest {
+
+  @Rule
+  public TestName testName = new TestName();
+
   private Transcript transcript;
   TestRunnable scratchRunnable = new TestRunnable();
 
-  private Handler.Callback callback = new Handler.Callback() {
+  private static class TestCallback implements Handler.Callback {
+    private Thread handledThread; 
+    private Message handledMessage;
+
     @Override
-    public boolean handleMessage(Message msg) {
-      hasHandlerCallbackHandledMessage = true;
+    public synchronized boolean handleMessage(Message msg) {
+      handledMessage = msg;
+      handledThread = Thread.currentThread();
+      notify();
       return false;
     }
   };
 
-  private Boolean hasHandlerCallbackHandledMessage = false;
-
+  private HandlerThread ht;
+  
   @Before
   public void setUp() throws Exception {
     transcript = new Transcript();
@@ -73,7 +86,7 @@ public class ShadowHandlerTest {
   private static Looper newLooper(boolean canQuit) {
     return ReflectionHelpers.callConstructor(Looper.class, from(boolean.class, canQuit));
   }
-  
+ 
   @Test
   public void testDifferentLoopersGetDifferentQueues() throws Exception {
     Looper looper1 = newLooper(true);
@@ -95,11 +108,28 @@ public class ShadowHandlerTest {
 
   @Test
   public void shouldCallProvidedHandlerCallback() {
+    TestCallback callback = new TestCallback();
     Handler handler = new Handler(callback);
-    handler.sendMessage(new Message());
-    assertTrue(hasHandlerCallbackHandledMessage);
+    Message msg = handler.obtainMessage();
+    handler.sendMessage(msg);
+    assertThat(callback.handledThread).as("handledThread").isSameAs(Thread.currentThread());
+    assertThat(callback.handledMessage).as("handledMessage").isSameAs(msg);
   }
 
+  @Test
+  public void shouldCallProvidedHandlerCallback_onAssociatedThread() throws InterruptedException {
+    TestCallback callback = new TestCallback();
+    ht = new HandlerThread(testName.getMethodName());
+    ht.start();
+    Handler handler = new Handler(ht.getLooper(), callback);
+    Message msg = handler.obtainMessage();
+    handler.sendMessage(msg);
+    shadowOf(ht.getLooper()).idle();
+    assertThat(callback.handledThread).as("handledThread").isSameAs(ht);
+    assertThat(callback.handledMessage).as("handledMessage").isSameAs(msg);
+    ht.quit();
+  }
+  
   @Test
   public void testPostAndIdleMainLooper() throws Exception {
     new Handler().post(scratchRunnable);
@@ -432,7 +462,7 @@ public class ShadowHandlerTest {
   public void shouldRemoveTaggedCallback() throws Exception {
     ShadowLooper.pauseMainLooper();
     Handler handler = new Handler();
-    
+   
     final int[] count = new int[1];
     Runnable r = new Runnable() {
       @Override
@@ -440,9 +470,9 @@ public class ShadowHandlerTest {
         count[0]++;  
       }
     };
-    
+   
     String tag1 = "tag1", tag2 = "tag2";
-    
+   
     handler.postAtTime(r, tag1, 100);
     handler.postAtTime(r, tag2, 105);
 
@@ -498,7 +528,7 @@ public class ShadowHandlerTest {
     h.sendEmptyMessageDelayed(0, 4000l);
     Robolectric.getForegroundThreadScheduler().advanceToLastPostedRunnable();
     h.sendEmptyMessageDelayed(0, 12000l);
-    Robolectric.getForegroundThreadScheduler().advanceToLastPostedRunnable();
+    Robolectric.getForegroundThreadScheduler().advanceToLastPostedRunnable();  
 
     assertThat(whens).as("whens").containsExactly(startTime, startTime + 4000, startTime + 16000);
   }
@@ -514,7 +544,6 @@ public class ShadowHandlerTest {
     h.sendEmptyMessage(0);
     h.sendMessageAtFrontOfQueue(h.obtainMessage());
   }
-
 
   private class Say implements Runnable {
     private String event;

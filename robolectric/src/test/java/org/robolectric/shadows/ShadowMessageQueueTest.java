@@ -1,7 +1,14 @@
 package org.robolectric.shadows;
 
+import java.lang.ref.WeakReference;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.Vector;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 import android.os.Build;
 import android.os.Handler;
@@ -11,7 +18,9 @@ import android.os.MessageQueue;
 
 import org.assertj.core.api.Assertions;
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.TestName;
 import org.junit.runner.RunWith;
 import org.robolectric.TestRunners;
 import org.robolectric.util.Scheduler;
@@ -27,9 +36,11 @@ public class ShadowMessageQueueTest {
   private MessageQueue queue;
   private ShadowMessageQueue shadowQueue;
   private Message testMessage;
-  private TestHandler handler;
+  private volatile TestHandler handler;
   private Scheduler scheduler;
   private String quitField;
+  private boolean isNativeStatic;
+  private boolean isLongPtr;
   
   private static class TestHandler extends Handler {
     public List<Message> handled = new ArrayList<>();
@@ -52,6 +63,14 @@ public class ShadowMessageQueueTest {
     return callConstructor(Looper.class, from(boolean.class, canQuit));
   }
   
+  private static MessageQueue newQueue() {
+    return newQueue(true);
+  }
+  
+  private static MessageQueue newQueue(boolean canQuit) {
+    return callConstructor(MessageQueue.class, from(boolean.class, canQuit));
+  }
+  
   @Before
   public void setUp() throws Exception {
     // Queues and loopers are closely linked; can't easily test one without the other.
@@ -63,41 +82,136 @@ public class ShadowMessageQueueTest {
     scheduler.pause();
     testMessage = handler.obtainMessage();
     quitField = Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT ? "mQuitting" : "mQuiting";
+    isNativeStatic = Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR2;
+    isLongPtr = Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP;
   }
 
-  private static ClassParameter<?> getPtrClass() {
-    return Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP ? from(long.class, 1) : from(int.class, 1);
+  private ClassParameter<?> getPtrClass() {
+    return getPtrClass((Number)getField(queue, "mPtr"));
+  }
+  
+  private ClassParameter<?> getPtrClass(Number num) {
+    return isLongPtr ? from(long.class, num.longValue()) : from(int.class, num.intValue());
   }
   
   private void shouldAssert(String method, ClassParameter<?>... params) {
     boolean ran = false;
-    String isStatic = "";
     try {
-      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR2) {
-        isStatic = "static ";
-        callStaticMethod(MessageQueue.class, method, params);
-      } else {
-        callInstanceMethod(queue, method, params);
-      }
+      invokeNative(method, params);
       ran = true;
     } catch (Throwable t) {
-      if (!(t instanceof AssertionError)) {
-        Assertions.fail("Expected an assertion when invoking " + isStatic + "method " + method + ", got: " + t, t);
+      if (!(t instanceof IllegalStateException)) {
+        Assertions.fail("Expected IllegalStateException when invoking " + (isNativeStatic ? "static " : "") + "method " + method + ", got: " + t, t);
       }
     }
-    assertThat(ran).as(method).overridingErrorMessage("Should have asserted but no exception was thrown").isFalse();
+    assertThat(ran).as(method).overridingErrorMessage("Expected IllegalStateException but no exception was thrown").isFalse();
+  }
+  
+  private <T> T invokeNative(String method, ClassParameter<?>... params) {
+    if (isNativeStatic) {
+      return callStaticMethod(MessageQueue.class, method, params);
+    } else {
+      return callInstanceMethod(queue, method, params);
+    }
+  }
+  
+  private void nativePollOnce(int timeoutMillis) {
+     invokeNative("nativePollOnce", getPtrClass(), from(int.class, timeoutMillis));
+  }
+
+  private void nativeWake() {
+    invokeNative("nativeWake", getPtrClass());
+  }
+
+  private class PollThread extends TestThread {
+    volatile boolean exited = false;
+
+    @Override
+    public void run() {
+      nativePollOnce(1000);
+      exited = true;
+    }
+  }
+  
+  // Starts the poll thread and waits until it has started waiting (maximum 1000ms wait)
+  private static void waitForPollThread(PollThread pt) {
+    pt.start();
+    long endTime = System.currentTimeMillis() + 1000;
+    while (pt.getState() != Thread.State.WAITING && pt.getState() != Thread.State.TIMED_WAITING && System.currentTimeMillis() < endTime) {
+      Thread.yield();
+    }
   }
   
   @Test
-  public void nativePollOnce_shouldAssert() {
-    shouldAssert("nativePollOnce", getPtrClass(), from(int.class, 2));
+  public void nativePollOnce_shouldScheduleCallbackAtTimeout() throws InterruptedException {
+    PollThread pt = new PollThread();
+    waitForPollThread(pt);
+    assertThat(scheduler.advanceBy(999)).as("before poll timeout").isFalse();
+    assertThat(pt.exited).as("thread shouldn't exit yet").isFalse();
+    assertThat(scheduler.size()).as("size before").isEqualTo(1);
+    scheduler.advanceBy(1);
+    assertThat(scheduler.size()).as("size after").isEqualTo(0);
+    pt.join(1000);
+    assertThat(pt.exited).as("thread exited").isTrue();
+  }
+ 
+  @Test
+  public void nativeWake_shouldInterruptPoll() throws InterruptedException {
+    PollThread pt = new PollThread();
+    waitForPollThread(pt);
+    assertThat(pt.exited).as("thread shouldn't exit yet").isFalse();
+    nativeWake();
+    pt.join(1000);
+    assertThat(pt.exited).as("thread exited").isTrue();
+  }
+
+  @Test
+  public void nativeInit_shouldAssert() {
+    shouldAssert("nativeInit");
+  }
+
+  @Test
+  public void mPtr_shouldBeUnique_forEachQueue() {
+    Number ptrBoxed = getField(queue, "mPtr");
+    MessageQueue queue2 = newQueue();
+    Number ptr2Boxed = getField(queue2, "mPtr");
+    assertThat(ptrBoxed).isNotEqualTo(ptr2Boxed);
+  }
+
+  @Test
+  public void newQueue_shouldBePlacedInNativeMap() {
+    Map<? extends Number, WeakReference<ShadowMessageQueue>> nativeMap = getStaticField(ShadowMessageQueue.class, "nativeMap");
+    Number ptr = getField(queue, "mPtr");
+    assertThat(nativeMap.get(ptr).get()).isSameAs(shadowQueue);
   }
   
   @Test
-  public void nativeWake_shouldAssert() {
-    shouldAssert("nativeWake", getPtrClass());
+  public void nativeDestroy_shouldRemoveFromNativeMap() {
+    // We're violating type safety here by casting it to Map<Number,...> rather than Map<? extends Number,...>,
+    // but we're not planning to put anything into the map so that's ok. Do this because AssertJ's
+    // doesNotContainKey() assertion tries to enforce the type and won't accept Number as a key.
+    Map<Number, ?> nativeMap = getStaticField(ShadowMessageQueue.class, "nativeMap");
+    Number ptr = getField(queue, "mPtr");
+    if (isNativeStatic) {
+      callStaticMethod(MessageQueue.class, "nativeDestroy", getPtrClass(ptr));
+    } else {
+      callInstanceMethod(queue, "nativeDestroy");
+    }
+    assertThat(nativeMap).doesNotContainKey(ptr);
   }
   
+  @Test
+  public void constructor_shouldSetQuitAllowed() {
+    assertThat((Boolean)getField(queue, "mQuitAllowed")).as("quitAllowed:true").isTrue();
+    MessageQueue queue2 = newQueue(false);
+    assertThat((Boolean)getField(queue2, "mQuitAllowed")).as("quitAllowed:false").isFalse();
+  }
+
+  @Test
+  public void constructor_shouldInitializeScheduler() {
+    assertThat(getField(shadowQueue, "scheduler")).as("mainThread").isSameAs(scheduler);
+  }
+
   @Test
   public void test_setGetHead() {
     shadowQueue.setHead(testMessage);
@@ -119,6 +233,9 @@ public class ShadowMessageQueueTest {
         );    
   }
   
+  private void doDispatch(Message msg) {
+    callInstanceMethod(shadowQueue, "doDispatch", from(Message.class, msg));
+  }
   
   @Test
   public void enqueueMessage_setsHead() {
@@ -222,4 +339,93 @@ public class ShadowMessageQueueTest {
     shadowQueue.reset();
     assertThat(shadowQueue.getScheduler()).isNotSameAs(old);
   }
+  
+  @Rule
+  public TestName testName = new TestName();
+  
+  // Thread for conveniently setting the thread name to something sensible
+  private class TestThread extends Thread {
+    public TestThread() {
+      super(testName.getMethodName());
+    }
+    
+    public TestThread(Runnable r) {
+      super(r, testName.getMethodName());
+    }
   }
+  
+  @Test
+  public void dispatchMessage_shouldDispatchToTargetThread_whenInvokedFromAnotherThread() throws InterruptedException {
+    // Used Vector rather than ArrayList because Vector is synchronized.
+    final List<String> events = new Vector<>();
+    final AtomicReference<Message> msgToDispatch = new AtomicReference<>();
+    final AtomicReference<Message> msgReceived = new AtomicReference<>();
+    final CountDownLatch started = new CountDownLatch(1);
+    new TestThread(new Runnable() {
+      @Override
+      public void run() {
+        // Need the queue to be created on a thread other than the test/UI thread.
+        Looper.prepare();
+        queue = Looper.myQueue();
+        shadowQueue = shadowOf(queue);
+        handler = new TestHandler(Looper.myLooper());
+        msgToDispatch.set(handler.obtainMessage());
+        started.countDown();
+        msgReceived.set(shadowQueue.next());
+        // Main thread *should* block waiting for this
+        // thread to call "done". If it does not,
+        // then this little sleep will cause it to run and
+        // add the post-dispatch event before we add
+        // "next returned", which will cause the test to 
+        // fail. This has the potential to be flaky and I'd
+        // like to figure out a way to test this without
+        // relying on an arbitrary-length sleep. 
+        try {
+          Thread.sleep(100);
+        } catch (InterruptedException e) {}
+        events.add("next returned");
+        shadowQueue.doneDispatch();
+      }
+    }).start();
+    started.await();
+    events.add("pre-dispatch");
+    doDispatch(msgToDispatch.get());
+    events.add("post-dispatch");
+    
+    assertThat(msgReceived.get()).as("dispatched msg").isSameAs(msgToDispatch.get());
+    assertThat(events).as("event order").containsExactly("pre-dispatch", "next returned", "post-dispatch");
+  }
+
+  @Test
+  public void doQuit_causesNextToReturnNull() throws InterruptedException {
+    // final AtomicReference<Message> msg = new AtomicReference<>();
+    // final CountDownLatch flag = new CountDownLatch(1);
+    // new TestThread(new Runnable() {
+    //   @Override
+    //   public void run() {
+    //     msg.set(shadowQueue.next());
+    //     flag.countDown();
+    //   }
+    // }).start();
+    // shadowQueue.doQuit();
+    // flag.await(1000, TimeUnit.MILLISECONDS);
+    // assertThat(msg.get()).isNull();
+  }
+  
+  @Test
+  public void whenQueueIsEmpty_andQuitting_shouldCallDoQuit() {
+//    final AtomicReference<Message> received = new AtomicReference<>();
+//    ReflectionHelpers.setField(queue, quitField, true);
+//    new TestThread(new Runnable() {
+//      @Override
+//      public void run() {
+//        shadowQueue.dispatchMessage(handler.obtainMessage());
+//      }
+//    }).start();
+//    Message msg = shadowQueue.next();
+//    assertThat(msg).as("msg").isNotNull();
+//    shadowQueue.doneDispatch();
+//    assertThat(shadowQueue.next()).as("terminate signal").isNull();
+  }
+}
+

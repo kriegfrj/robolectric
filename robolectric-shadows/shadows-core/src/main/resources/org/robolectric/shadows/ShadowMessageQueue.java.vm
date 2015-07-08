@@ -1,9 +1,16 @@
 package org.robolectric.shadows;
 
 import android.os.Handler;
+import android.os.Looper;
 import android.os.Message;
 import android.os.MessageQueue;
 
+import java.lang.ref.WeakReference;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.SynchronousQueue;
+import java.util.concurrent.atomic.Atomic$ptrClassBoxed;
 import javax.annotation.Generated;
 
 import org.robolectric.annotation.HiddenApi;
@@ -32,35 +39,79 @@ public class ShadowMessageQueue {
   private MessageQueue realQueue;
 
   private Scheduler scheduler = new Scheduler();
+  private final Thread thread = Thread.currentThread();
+  private static Atomic$ptrClassBoxed nextPtr = new Atomic$ptrClassBoxed();
+  // The value references need to be weak so that we don't prevent garbage collection.
+  private static Map<$ptrClassBoxed,WeakReference<ShadowMessageQueue>> nativeMap = new HashMap<>();
+
 #if ($api >= 21)
 #set($recycle = "recycleUnchecked")
 #else
 #set($recycle = "recycle")
 #end
 
-  // Stub out the native peer - scheduling
-  // is handled by the Scheduler class which is user-driven
-  // rather than automatic.
+  public void __constructor__(boolean quitAllowed) {
+    setField(realQueue, "mQuitAllowed", quitAllowed);
+    $ptrClassBoxed ptr = nextPtr.getAndIncrement();
+    setField(realQueue, "mPtr", ptr);
+    nativeMap.put(ptr, new WeakReference<>(this));
+  }
+
+  // nativeInit() in real Android is called by the constructor.
+  // We shadow the constructor directly and hence bypass this
+  // invocation - it makes the initialization easier.
   @HiddenApi
   @Implementation
-  public static $ptrClass nativeInit() {
-    return 1;
+  public static void nativeInit() {
+    throw new IllegalStateException("Should not be called");
   }
   
   @HiddenApi
   @Implementation
-  public static void nativeDestroy($ptrClass ptr) {}
+#if ($api >= 18)
+  public static void nativeDestroy($ptrClass ptr) {
+    nativeMap.remove(ptr);
+  }
+#else
+  public void nativeDestroy() {
+    nativeMap.remove(getField(realQueue, "mPtr")); 
+  }
+#end
+
+  private CountDownLatch proceed;
+  
+  public void doNativePollOnce(int timeoutMillis) {
+    proceed = new CountDownLatch(1);
+    scheduler.postDelayed(new Runnable() {
+      @Override
+      public void run() {
+        proceed.countDown();
+      }
+    }, timeoutMillis);
+    try {
+      proceed.await();
+      // FIXME: remove the runnable if it didn't execute? 
+    } catch (InterruptedException ignore) {}
+  }
+  
+  public void doNativeWake() {
+    proceed.countDown();
+  }
+  
+  private static ShadowMessageQueue getQueueForPtr($ptrClass ptr) {
+    return nativeMap.get(ptr).get();
+  }
   
   @HiddenApi
   @Implementation
   public static void nativePollOnce($ptrClass ptr, int timeoutMillis) {
-    throw new AssertionError("Should not be called");
+    getQueueForPtr(ptr).doNativePollOnce(timeoutMillis);
   }
 
   @HiddenApi
   @Implementation
   public static void nativeWake($ptrClass ptr) {
-    throw new AssertionError("Should not be called");    
+    getQueueForPtr(ptr).doNativeWake();
   }
   
   @HiddenApi
@@ -85,51 +136,100 @@ public class ShadowMessageQueue {
     setHead(null);
     scheduler = new Scheduler();
   }
-  
+ 
+//  @Implementation
+//  public boolean enqueueMessage(final Message msg, long when) {
+//    final boolean retval = directlyOn(realQueue, MessageQueue.class, "enqueueMessage", from(Message.class, msg), from(long.class, when));
+//    if (retval) {
+//      final Runnable callback = new Runnable() {
+//        @Override
+//        public void run() {
+//          dispatchMessage(msg);
+//        }
+//      };
+//      shadowOf(msg).setScheduledRunnable(callback);
+//      if (when == 0) {
+//        scheduler.postAtFrontOfQueue(callback);
+//      } else {
+//        scheduler.postDelayed(callback, when - scheduler.getCurrentTime());
+//      }
+//    }
+//    return retval;
+
+  private static final Message QUIT_MARKER = new Message();
+
+  private SynchronousQueue<Message> nextMsg = new SynchronousQueue<>();
+  private CountDownLatch doneFlag;
+
   @Implementation
-  public boolean enqueueMessage(final Message msg, long when) {
-    final boolean retval = directlyOn(realQueue, MessageQueue.class, "enqueueMessage", from(Message.class, msg), from(long.class, when));
-    if (retval) {
-      final Runnable callback = new Runnable() {
-        @Override
-        public void run() {
-          synchronized (realQueue) {
-            Message m = getHead();
-            if (m == null) {
-              return;
-            }
-
-            Message n = shadowOf(m).getNext();
-            if (m == msg) {
-              setHead(n);
-              dispatchMessage(msg);
-              return;
-            }
-
-            while (n != null) {
-              if (n == msg) {
-                n = shadowOf(n).getNext();
-                shadowOf(m).setNext(n);
-                dispatchMessage(msg);
-                return;
-              }
-              m = n;
-              n = shadowOf(m).getNext();
-            }
-          }
-        }
-      };
-      shadowOf(msg).setScheduledRunnable(callback);
-      if (when == 0) {
-        scheduler.postAtFrontOfQueue(callback);
-      } else {
-        scheduler.postDelayed(callback, when - scheduler.getCurrentTime());
+  public Message next() {
+    try {
+      final Message retval = nextMsg.take();
+      if (retval == QUIT_MARKER) {
+        return null;
       }
+      return retval;
+    } catch (InterruptedException e) {
+      // FIXME: Do something sensible?
     }
-    return retval;
+    return null;
   }
 
-  private static void dispatchMessage(Message msg) {
+  /**
+   * Causes the associated {@link Looper} to immediately return from {@link Looper#loop loop()}.
+   * Achieves this by causing the pending/next call to {@link #next} to immediately return
+   * <tt>null</tt>, which is interpreted by {@link ShadowLooper#doLoop() doLoop()} as a signal
+   * to exit its loop.
+   */
+  public void doQuit() {
+    try {
+      nextMsg.put(QUIT_MARKER);
+    } catch (InterruptedException e) {}
+  }
+
+  /**
+   * Signals that the looper thread is finished dispatching the last message returned by {@link #next}. 
+   */
+  public void doneDispatch() {
+    doneFlag.countDown();
+  }
+
+  public void dispatchMessage(Message msg) {
+    synchronized (realQueue) {
+      Message m = getHead();
+      if (m == null) {
+        return;
+      }
+
+      Message n = shadowOf(m).getNext();
+      if (m == msg) {
+        setHead(n);
+        doDispatch(msg);
+        return;
+      }
+
+      while (n != null) {
+        if (n == msg) {
+          n = shadowOf(n).getNext();
+          shadowOf(m).setNext(n);
+          doDispatch(msg);
+          return;
+        }
+        m = n;
+        n = shadowOf(m).getNext();
+      }
+    }
+  } 
+ 
+  /**
+   * Synchronously dispatches the given message on the appropriate thread. If the calling thread
+   * is the same as this queue/looper's thread, then it simply dispatches the message inline.
+   * Otherwise, it sends the message (via the {@link #nextMsg} queue) to the associated thread
+   * and waits for that thread to call {@link #doneDispatch} before proceeding.
+   *
+   * @param msg the message to be dispatched.
+   */
+  private void doDispatch(Message msg) {
     final Handler target = msg.getTarget();
     
     shadowOf(msg).setNext(null);
@@ -137,7 +237,18 @@ public class ShadowMessageQueue {
     // from the queue prior to being dispatched by the scheduler.
     if (target != null) {
       callInstanceMethod(msg, "markInUse");
-      target.dispatchMessage(msg);
+      if (Thread.currentThread() == thread) {
+        target.dispatchMessage(msg);
+      } else {
+        doneFlag = new CountDownLatch(1);
+        try {
+      	  nextMsg.put(msg);
+      	  doneFlag.await();
+        } catch (InterruptedException e) {
+          // FIXME: do something sensible ?
+        }
+        doneFlag = null;
+      }
       callInstanceMethod(msg, "$recycle");
     }
   }

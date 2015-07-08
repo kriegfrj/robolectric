@@ -1,6 +1,7 @@
 package org.robolectric.shadows;
 
 import android.os.Looper;
+import android.os.Message;
 
 import java.util.Collections;
 import java.util.Map;
@@ -77,13 +78,15 @@ public class ShadowLooper {
 
   private void doLoop() {
     if (this != getShadowMainLooper()) {
-      synchronized (realObject) {
-        while (!quit) {
-          try {
-            realObject.wait();
-          } catch (InterruptedException ignore) {
-          }
+      ShadowMessageQueue queue = shadowOf(realObject.getQueue());
+      Message msg = queue.next();
+      while (msg != null) {
+        try {
+          msg.getTarget().dispatchMessage(msg);
+        } finally {
+          queue.doneDispatch();
         }
+        msg = queue.next();
       }
     }
   }
