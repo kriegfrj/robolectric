@@ -2,11 +2,14 @@ package org.robolectric.shadows;
 
 import android.os.Looper;
 import android.os.Message;
+import android.os.MessageQueue;
 
 import java.util.Collections;
 import java.util.Map;
 import java.util.WeakHashMap;
+import java.util.concurrent.SynchronousQueue;
 
+import org.robolectric.RuntimeEnvironment;
 import org.robolectric.annotation.Implementation;
 import org.robolectric.annotation.Implements;
 import org.robolectric.annotation.RealObject;
@@ -28,7 +31,6 @@ import static org.robolectric.util.ReflectionHelpers.ClassParameter.from;
  */
 @Implements(Looper.class)
 public class ShadowLooper {
-  private static final Thread MAIN_THREAD = Thread.currentThread();
   // Replaced SoftThreadLocal with a WeakHashMap, because ThreadLocal make it impossible to access their contents from other
   // threads, but we need to be able to access the loopers for all threads so that we can shut them down when resetThreadLoopers()
   // is called. This also allows us to implement the useful getLooperForThread() method.
@@ -43,7 +45,7 @@ public class ShadowLooper {
     // Blech. We need to keep the main looper because somebody might refer to it in a static
     // field. The other loopers need to be wrapped in WeakReferences so that they are not prevented from
     // being garbage collected.
-    if (Thread.currentThread() != MAIN_THREAD) {
+    if (!RuntimeEnvironment.isMainThread()) {
       throw new IllegalStateException("you should only be calling this from the main thread!");
     }
     synchronized (loopingLoopers) {
@@ -66,30 +68,32 @@ public class ShadowLooper {
   @Implementation
   public void __constructor__(boolean quitAllowed) {
     invokeConstructor(Looper.class, realObject, from(boolean.class, quitAllowed));
-    if (Thread.currentThread() != MAIN_THREAD) {
+    if (!RuntimeEnvironment.isMainThread()) {
       loopingLoopers.put(Thread.currentThread(), realObject);
     }
   }
     
   @Implementation
   public static void loop() {
-    shadowOf(Looper.myLooper()).doLoop();
-  }
-
-  private void doLoop() {
-    if (this != getShadowMainLooper()) {
-      ShadowMessageQueue queue = shadowOf(realObject.getQueue());
-      Message msg = queue.next();
-      while (msg != null) {
-        try {
-          msg.getTarget().dispatchMessage(msg);
-        } finally {
-          queue.doneDispatch();
-        }
-        msg = queue.next();
-      }
+    if (!RuntimeEnvironment.isMainThread()) {
+      directlyOn(Looper.class, "loop");
     }
   }
+
+//  private void doLoop() {
+//    if (this != getShadowMainLooper()) {
+//      ShadowMessageQueue queue = shadowOf(realObject.getQueue());
+//      Message msg = queue.next();
+//      while (msg != null) {
+//        try {
+//          msg.getTarget().dispatchMessage(msg);
+//        } finally {
+//          queue.doneDispatch();
+//        }
+//        msg = queue.next();
+//      }
+//    }
+//  }
 
   @Implementation
   public void quit() {
@@ -125,7 +129,7 @@ public class ShadowLooper {
   }
   
   public static Looper getLooperForThread(Thread thread) {
-    return thread == MAIN_THREAD ? Looper.getMainLooper() : loopingLoopers.get(thread);
+    return RuntimeEnvironment.isMainThread() ? Looper.getMainLooper() : loopingLoopers.get(thread);
   }
   
   public static void pauseLooper(Looper looper) {
@@ -273,6 +277,29 @@ public class ShadowLooper {
     }
   }
 
+  @Implementation
+  public static void prepareMainLooper() {
+    directlyOn(Looper.class, "prepareMainLooper");
+    new MainLooper().start();
+  }
+  
+  static SynchronousQueue<Message> nextMsg = new SynchronousQueue<>();
+  
+  private static class MainLooper extends Thread {
+    public MainLooper() {
+      super("mainLooper");
+    }
+    
+    public void run() {
+      MessageQueue q = Looper.getMainLooper().getQueue();
+      while (true) {
+        try {
+          nextMsg.put((Message)ReflectionHelpers.callInstanceMethod(q, "next"));
+        } catch (InterruptedException ignore) {}
+      }
+    }
+  }
+  
   public void pause() {
     getScheduler().pause();
   }

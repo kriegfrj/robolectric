@@ -13,6 +13,7 @@ import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.atomic.Atomic$ptrClassBoxed;
 import javax.annotation.Generated;
 
+import org.robolectric.RuntimeEnvironment;
 import org.robolectric.annotation.HiddenApi;
 import org.robolectric.annotation.Implementation;
 import org.robolectric.annotation.Implements;
@@ -96,6 +97,11 @@ public class ShadowMessageQueue {
   
   public void doNativeWake() {
     proceed.countDown();
+    if (RuntimeEnvironment.isMainThread()) {
+      try {
+        doDispatch(ShadowLooper.nextMsg.take());
+      } catch (InterruptedException ignore) {}
+    }
   }
   
   private static ShadowMessageQueue getQueueForPtr($ptrClass ptr) {
@@ -161,19 +167,19 @@ public class ShadowMessageQueue {
   private SynchronousQueue<Message> nextMsg = new SynchronousQueue<>();
   private CountDownLatch doneFlag;
 
-  @Implementation
-  public Message next() {
-    try {
-      final Message retval = nextMsg.take();
-      if (retval == QUIT_MARKER) {
-        return null;
-      }
-      return retval;
-    } catch (InterruptedException e) {
-      // FIXME: Do something sensible?
-    }
-    return null;
-  }
+//  @Implementation
+//  public Message next() {
+//    try {
+//      final Message retval = nextMsg.take();
+//      if (retval == QUIT_MARKER) {
+//        return null;
+//      }
+//      return retval;
+//    } catch (InterruptedException e) {
+//      // FIXME: Do something sensible?
+//    }
+//    return null;
+//  }
 
   /**
    * Causes the associated {@link Looper} to immediately return from {@link Looper#loop loop()}.
