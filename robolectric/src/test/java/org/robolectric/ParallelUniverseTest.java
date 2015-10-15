@@ -86,7 +86,7 @@ public class ParallelUniverseTest {
   @Test
   public void resetStaticStatic_setsMainThread(){
     RuntimeEnvironment.setMainThread(new Thread());
-    pu.resetStaticState(getDefaultConfig());
+    pu.resetStaticState();
     assertThat(RuntimeEnvironment.isMainThread()).isTrue();
   }
 

@@ -7,7 +7,7 @@ import org.robolectric.annotation.Config;
 import org.robolectric.res.ResourceLoader;
 
 public interface ParallelUniverseInterface {
-  void resetStaticState(Config config);
+  void resetStaticState();
 
   void setUpApplicationState(Method method, TestLifecycle testLifecycle, ResourceLoader systemResourceLoader, AndroidManifest appManifest, Config config);
 

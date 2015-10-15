@@ -34,22 +34,17 @@ public class ParallelUniverse implements ParallelUniverseInterface {
   private final RobolectricTestRunner robolectricTestRunner;
   private final ShadowsAdapter shadowsAdapter = Robolectric.getShadowsAdapter();
 
-  private boolean loggingInitialized = false;
   private SdkConfig sdkConfig;
 
   public ParallelUniverse(RobolectricTestRunner robolectricTestRunner) {
     this.robolectricTestRunner = robolectricTestRunner;
+    shadowsAdapter.setupLogging();
   }
 
   @Override
-  public void resetStaticState(Config config) {
+  public void resetStaticState() {
     RuntimeEnvironment.setMainThread(Thread.currentThread());
     Robolectric.reset();
-
-    if (!loggingInitialized) {
-      shadowsAdapter.setupLogging();
-      loggingInitialized = true;
-    }
   }
 
   /*

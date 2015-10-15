@@ -51,6 +51,7 @@ public class ShadowAsyncTask<Params, Progress, Result> {
     */
   @Resetter
   public static void reset() {
+    AsyncTask.setDefaultExecutor(AsyncTask.SERIAL_EXECUTOR);
     for (AsyncTask<?,?,?> task : queuedTasks) {
       if (task != null) {
         shadowOf(task).abort();

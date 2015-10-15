@@ -36,7 +36,14 @@ public class ShadowAsyncTaskTest {
   }
 
   @Test
-  public void reset_shouldEmptyExecutorQueue() {
+  public void reset_shouldSetDefaultExecutor_toSerial() {
+    AsyncTask.setDefaultExecutor(new ImmediateExecutor());
+    ShadowAsyncTask.reset();
+    assertThat(ReflectionHelpers.getStaticField(AsyncTask.class, "sDefaultExecutor")).isSameAs(AsyncTask.SERIAL_EXECUTOR);
+  }
+
+  @Test(timeout=1000)
+  public void reset_shouldEmptyExecutorQueue() throws InterruptedException {
     ArrayDeque<Runnable> serialQueue = ReflectionHelpers.getField(AsyncTask.SERIAL_EXECUTOR, "mTasks");
 
     for (int i = 0; i < 5; i++) {
@@ -53,7 +60,13 @@ public class ShadowAsyncTaskTest {
     assertThat(queueSize).as("beforeReset").isGreaterThan(0);
     ShadowAsyncTask.reset();
     assertThat(serialQueue).as("afterReset").isEmpty();
-    assertThat(ReflectionHelpers.getField(AsyncTask.SERIAL_EXECUTOR, "mActive")).as("afterReset.active").isNull();
+    // Although reset() synchronizes with all of the runnables as they exit, there is a slight
+    // delay between the runnable triggering the end flag and the serial executor clearing the last
+    // active task. This seems to make more difference on some machines (eg, Travis). Spin for a
+    // little bit to give the thread a chance to clean up after itself.
+    while (ReflectionHelpers.getField(AsyncTask.SERIAL_EXECUTOR, "mActive") != null) {
+      Thread.sleep(100);
+    }
   }
 
   @Test
