@@ -9,7 +9,8 @@ if [ -z ${INCLUDE_SOURCE+x} ]; then SOURCE_ARG=""; else SOURCE_ARG="source:jar";
 if [ -z ${INCLUDE_JAVADOC+x} ]; then JAVADOC_ARG=""; else JAVADOC_ARG="javadoc:jar"; fi
 
 echo "Building Robolectric..."
-cd "$PROJECT"; mvn -D skipTests clean $SOURCE_ARG $JAVADOC_ARG install
+cd "$PROJECT";
+mvn -D skipTests clean $SOURCE_ARG $JAVADOC_ARG install -pl . -pl robolectric-annotations --pl robolectric-utils -pl robolectric-resources -pl robolectric-shadows -pl robolectric-processor -pl robolectric-shadows/shadows-core -pl robolectric
 
 echo "Building shadows for API 16..."
 cd "$PROJECT"/robolectric-shadows/shadows-core; mvn -P android-16 clean $SOURCE_ARG $JAVADOC_ARG install
