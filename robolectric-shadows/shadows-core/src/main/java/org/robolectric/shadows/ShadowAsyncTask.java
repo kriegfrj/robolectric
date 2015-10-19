@@ -90,6 +90,7 @@ public class ShadowAsyncTask<Params, Progress, Result> {
    * {@link AsyncTask#execute(Object[])}.
    */
   public void abort() {
+    log("abort");
     aborted.set(true);
     startFlag.countDown();
   }
@@ -100,26 +101,31 @@ public class ShadowAsyncTask<Params, Progress, Result> {
     private FutureTask<Result> wrapped;
     public FutureTaskWrapper(FutureTask<Result> wrapped) {
       super(wrapped, null);
+      log("ftw.constructor");
       this.wrapped = wrapped;
     }
 
     @Override
     public boolean cancel(boolean mayInterruptIfRunning) {
+      log("ftw.cancel" + mayInterruptIfRunning);
       return wrapped.cancel(mayInterruptIfRunning);
     }
 
     @Override
     public Result get() throws InterruptedException, ExecutionException {
+      log("ftw.get()");
       return wrapped.get();
     }
 
     @Override
     public Result get(long timeout, TimeUnit unit) throws InterruptedException, ExecutionException, TimeoutException {
+      log("ftw.get(" + timeout + ", " + unit + ")");
       return wrapped.get(timeout, unit);
     }
 
     @Override
     public void run() {
+      log("ftw.run()");
       try {
         // This could be run on the main thread if eg you have an executor which simply
         // calls the run() method on the runnable directly.
@@ -141,12 +147,14 @@ public class ShadowAsyncTask<Params, Progress, Result> {
       } catch (Throwable t) {
         thrown.set(t);
       } finally {
+        log("ftw.run() - counting down");
         endFlag.countDown();
       }
     }
   };
 
   public void __constructor__() {
+    log("constructor()");
     Shadow.invokeConstructor(AsyncTask.class, realAsyncTask);
     FutureTask<Result> orig = ReflectionHelpers.getField(realAsyncTask, "mFuture");
     FutureTaskWrapper wrapper = new FutureTaskWrapper(orig);
@@ -156,6 +164,7 @@ public class ShadowAsyncTask<Params, Progress, Result> {
 
   @Implementation
   public void publishProgress(Progress... values) {
+    log("publishProgress()");
     if (aborted.get()) {
       return;
     }
@@ -164,6 +173,7 @@ public class ShadowAsyncTask<Params, Progress, Result> {
 
   @Implementation
   public void finish(Result r) {
+    log("finish()");
     if (aborted.get()) {
       return;
     }
@@ -176,6 +186,7 @@ public class ShadowAsyncTask<Params, Progress, Result> {
 
   @Implementation
   public AsyncTask<Params, Progress, Result> executeOnExecutor(Executor exec, Params... params) {
+    log("executeOnExector");
     if (aborted.get()) {
       return realAsyncTask;
     }
@@ -195,5 +206,9 @@ public class ShadowAsyncTask<Params, Progress, Result> {
       }
     });
     return realAsyncTask;
+  }
+
+  public void log(String msg) {
+    System.err.println(this + ": " + msg);
   }
 }
